@@ -108,4 +108,5 @@ skip.
 
 ## Licence
 
-MIT (see `LICENSE`), unless the rest of your tree says otherwise.
+MPL-2.0 (see `LICENSE`). The Mozilla Public License is FILE-LEVEL copyleft: you may combine
+this with differently-licensed code, but modifications to MPL-covered *files* must stay MPL.
