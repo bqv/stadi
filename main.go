@@ -24,6 +24,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -43,6 +44,8 @@ import (
 	"time"
 )
 
+const version = "0.2.0"
+
 type config struct {
 	listen    string        // where stadi itself listens
 	llm       string        // the llama router
@@ -57,40 +60,91 @@ type config struct {
 	sdLogDir  string
 }
 
-func env(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
+// envOr resolves a setting: the flag when given, else the environment variable, else
+// the built-in default. Flags win, but an existing conf.d of env vars keeps working
+// unchanged, so the service needs no flag plumbing to stay correct.
+func envOr(flagVal, key, def string) string {
+	if flagVal != "" {
+		return flagVal
+	}
+	if e := os.Getenv(key); e != "" {
+		return e
 	}
 	return def
 }
 
-func envDur(key string, def time.Duration) time.Duration {
-	if v := os.Getenv(key); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			return d
-		}
-		log.Printf("bad duration in %s=%q, using %s", key, v, def)
+func envOrDur(flagVal, key string, def time.Duration) time.Duration {
+	s := envOr(flagVal, key, "")
+	if s == "" {
+		return def
 	}
-	return def
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		log.Printf("bad duration %q (flag or %s), using %s", s, key, def)
+		return def
+	}
+	return d
+}
+
+// defaultLogDir follows the XDG cache location rather than assuming a home path.
+// A hardcoded /home/... is how a tool becomes wrong on someone else's machine.
+func defaultLogDir() string {
+	if d, err := os.UserCacheDir(); err == nil {
+		return filepath.Join(d, "stadi")
+	}
+	return filepath.Join(os.TempDir(), "stadi")
+}
+
+// defaultSDBin finds sd-server on PATH instead of assuming /usr/bin.
+func defaultSDBin() string {
+	if p, err := exec.LookPath("sd-server"); err == nil {
+		return p
+	}
+	return "sd-server"
 }
 
 func loadConfig() config {
-	args := strings.Fields(env("STADI_SD_ARGS", ""))
+	var (
+		fListen   = flag.String("listen", "", "address to listen on (env STADI_LISTEN)")
+		fLLM      = flag.String("llm", "", "llama router base URL (env STADI_LLM)")
+		fSD       = flag.String("sd", "", "URL the sd child comes up on (env STADI_SD)")
+		fIdle     = flag.String("idle", "", "stop the child after this long with no media request (env STADI_IDLE)")
+		fBusyWait = flag.String("busy-wait", "", "how long a chat request waits for a render (env STADI_BUSY_WAIT)")
+		fVramWait = flag.String("vram-wait", "", "bound on waiting for the card to come back (env STADI_VRAM_WAIT)")
+		fLoadWait = flag.String("load-wait", "", "bound on the child's port appearing (env STADI_LOAD_WAIT)")
+		fFreeGiB  = flag.Float64("free-gib", 2, "treat the card as free below this many GiB used")
+		fSDBin    = flag.String("sd-bin", "", "sd-server binary (env STADI_SD_BIN; default: looked up on PATH)")
+		fSDArgs   = flag.String("sd-args", "", "the child's whole command line, space separated (env STADI_SD_ARGS)")
+		fSDLogDir = flag.String("sd-log-dir", "", "directory for the child's stdout/stderr (env STADI_SD_LOG_DIR)")
+		fVersion  = flag.Bool("version", false, "print the version and exit")
+	)
+	flag.Parse()
+	if *fVersion {
+		fmt.Println("stadi " + version)
+		os.Exit(0)
+	}
+
+	raw := envOr(*fSDArgs, "STADI_SD_ARGS", "")
+	args := strings.Fields(raw)
 	if len(args) == 0 {
-		log.Fatal("STADI_SD_ARGS is empty: refusing to run with no sd-server command line")
+		log.Fatal("no sd-server command line given: pass --sd-args \"...\" or set STADI_SD_ARGS")
+	}
+	freeGiB := *fFreeGiB
+	if freeGiB <= 0 {
+		freeGiB = 2
 	}
 	return config{
-		listen:    env("STADI_LISTEN", "127.0.0.1:55558"),
-		llm:       env("STADI_LLM", "http://127.0.0.1:55555"),
-		sd:        env("STADI_SD", "http://127.0.0.1:55557"),
-		idle:      envDur("STADI_IDLE", 5*time.Minute),
-		busyWait:  envDur("STADI_BUSY_WAIT", 2*time.Minute),
-		vramWait:  envDur("STADI_VRAM_WAIT", 45*time.Second),
-		loadWait:  envDur("STADI_LOAD_WAIT", 15*time.Minute),
-		freeBelow: 2 << 30, // 2 GiB: an idle 7900 XT reads ~0.03 GiB, a resident rung 17+
-		sdBin:     env("STADI_SD_BIN", "/usr/bin/sd-server"),
+		listen:    envOr(*fListen, "STADI_LISTEN", "127.0.0.1:55558"),
+		llm:       envOr(*fLLM, "STADI_LLM", "http://127.0.0.1:55555"),
+		sd:        envOr(*fSD, "STADI_SD", "http://127.0.0.1:55557"),
+		idle:      envOrDur(*fIdle, "STADI_IDLE", 5*time.Minute),
+		busyWait:  envOrDur(*fBusyWait, "STADI_BUSY_WAIT", 2*time.Minute),
+		vramWait:  envOrDur(*fVramWait, "STADI_VRAM_WAIT", 45*time.Second),
+		loadWait:  envOrDur(*fLoadWait, "STADI_LOAD_WAIT", 15*time.Minute),
+		freeBelow: uint64(freeGiB * float64(1<<30)),
+		sdBin:     envOr(*fSDBin, "STADI_SD_BIN", defaultSDBin()),
 		sdArgs:    args,
-		sdLogDir:  env("STADI_SD_LOG_DIR", "/home/user/.dsh/logs"),
+		sdLogDir:  envOr(*fSDLogDir, "STADI_SD_LOG_DIR", defaultLogDir()),
 	}
 }
 
@@ -481,6 +535,7 @@ func (b *broker) status(w http.ResponseWriter) {
 	b.mu.Unlock()
 	used, _ := vramUsed()
 	out := map[string]any{
+		"version":         version,
 		"slot":            slotName(up),
 		"sd_child_up":     up,
 		"sd_child_pid":    pid,

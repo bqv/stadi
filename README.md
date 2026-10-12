@@ -69,25 +69,35 @@ go build -o stadi .
 
 ## Configure
 
-Everything comes from the environment:
+**Flags first, environment as the fallback.** Every setting is a command-line argument; each
+falls back to its environment variable and then to a portable default, so a unit file can pass
+arguments explicitly while an existing `conf.d` of environment variables keeps working
+unchanged. `stadi -h` is the authoritative list.
 
-| variable | default |
-| :-- | :-- |
-| `STADI_LISTEN` | `127.0.0.1:55558` |
-| `STADI_LLM` | `http://127.0.0.1:55555` |
-| `STADI_SD` | `http://127.0.0.1:55557` — where the **child** comes up |
-| `STADI_IDLE` | `5m` — stop the child after this long with no media request |
-| `STADI_BUSY_WAIT` | `2m` — how long a chat request waits for a render before answering 503 |
-| `STADI_VRAM_WAIT` | `45s` — bound on waiting for the card to come back |
-| `STADI_LOAD_WAIT` | `15m` — bound on the child's port appearing |
-| `STADI_SD_BIN` | `/usr/bin/sd-server` |
-| `STADI_SD_ARGS` | **required** — the child's whole command line |
-| `STADI_SD_LOG_DIR` | `/var/log` — the child's stdout/stderr |
+| flag | environment | default |
+| :-- | :-- | :-- |
+| `-listen` | `STADI_LISTEN` | `127.0.0.1:55558` |
+| `-llm` | `STADI_LLM` | `http://127.0.0.1:55555` |
+| `-sd` | `STADI_SD` | `http://127.0.0.1:55557` — where the **child** comes up |
+| `-idle` | `STADI_IDLE` | `5m` — stop the child after this long with no media request |
+| `-busy-wait` | `STADI_BUSY_WAIT` | `2m` — how long a chat request waits for a render, then 503 |
+| `-vram-wait` | `STADI_VRAM_WAIT` | `45s` — bound on waiting for the card to come back |
+| `-load-wait` | `STADI_LOAD_WAIT` | `15m` — bound on the child's port appearing |
+| `-free-gib` | — | `2` — treat the card as free below this many GiB used |
+| `-sd-bin` | `STADI_SD_BIN` | the `sd-server` found on `PATH` |
+| `-sd-args` | `STADI_SD_ARGS` | **required** — the child's whole command line |
+| `-sd-log-dir` | `STADI_SD_LOG_DIR` | `$XDG_CACHE_HOME/stadi` |
+| `-version` | — | print the version and exit |
 
-Note on `STADI_SD_ARGS`: do **not** pass `--params-backend` for stable-diffusion.cpp. Its
-`--help` says an explicit `--params-backend` **disables `--auto-fit`**, and auto-fit is what
-performs the graph segmentation that tiles a VAE decode too large for the card. Pinning the
-*params* split throws away the fallback; pinning `--backend` is safe and is preserved.
+There is deliberately **no hardcoded home path** anywhere: the binary is looked up on `PATH`
+and the log directory follows XDG, so the tool does not assume whose machine it is on.
+
+Two notes on `-sd-args`: it is one space-separated string — a list, so the environment is the
+natural transport for it, and a unit file quoting it through `command_args` would need nested
+quotes that OpenRC does not interpret. And for stable-diffusion.cpp it must **not** include
+`--params-backend`: that flag's own `--help` says an explicit `--params-backend` **disables
+`--auto-fit`**, which is what performs the graph segmentation tiling a VAE decode too large for
+the card. Pinning the *params* split throws the fallback away; pinning `--backend` is safe.
 
 ## Design notes worth keeping
 
